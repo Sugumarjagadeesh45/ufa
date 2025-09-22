@@ -231,13 +231,12 @@ const TaxiContent: React.FC<TaxiContentProps> = ({
   const [acceptedDriver, setAcceptedDriver] = useState<DriverType | null>(null);
   const [isBooking, setIsBooking] = useState(false);
   
+  const [driverName, setDriverName] = useState<string | null>(null);
+  const [driverMobile, setDriverMobile] = useState<string | null>(null);
+  
   const pickupDebounceTimer = useRef<NodeJS.Timeout | null>(null);
   const dropoffDebounceTimer = useRef<NodeJS.Timeout | null>(null);
 
-  // Add these states (if not already present)
-const [driverName, setDriverName] = useState<string | null>(null);
-const [driverMobile, setDriverMobile] = useState<string | null>(null);
-  
   const panelAnimation = useRef(new Animated.Value(0)).current;
   const mapRef = useRef<MapView | null>(null);
 
@@ -259,9 +258,8 @@ const [driverMobile, setDriverMobile] = useState<string | null>(null);
     return distance;
   };
 
-  // Add this function to calculate distance in meters
   const calculateDistanceInMeters = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
-    const R = 6371; // Earth's radius in kilometers
+    const R = 6371;
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
     const a = 
@@ -270,9 +268,10 @@ const [driverMobile, setDriverMobile] = useState<string | null>(null);
       Math.sin(dLon/2) * Math.sin(dLon/2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     const distanceKm = R * c;
-    return distanceKm * 1000; // Convert to meters
+    return distanceKm * 1000;
   };
 
+  // ✅ CORRECTED: Nearby drivers filtering logic
   const fetchNearbyDrivers = (latitude: number, longitude: number) => {
     console.log(`Fetching nearby drivers for lat: ${latitude}, lng: ${longitude}`);
     if (socket && socketConnected) {
@@ -298,6 +297,7 @@ const [driverMobile, setDriverMobile] = useState<string | null>(null);
     }
   };
 
+  // ✅ CORRECTED: Nearby drivers response handler
   useEffect(() => {
     const handleNearbyDriversResponse = (data: { drivers: DriverType[] }) => {
       console.log('Received nearby drivers response:', JSON.stringify(data, null, 2));
@@ -306,6 +306,21 @@ const [driverMobile, setDriverMobile] = useState<string | null>(null);
         return;
       }
       
+      // ✅ ACTIVE RIDE: Show only accepted driver
+      if (currentRideId && acceptedDriver) {
+        console.log('🚗 Active ride - Showing only accepted driver');
+        const acceptedDriverData = data.drivers.find(d => d.driverId === acceptedDriver.driverId);
+        if (acceptedDriverData) {
+          setNearbyDrivers([acceptedDriverData]);
+          setNearbyDriversCount(1);
+        } else {
+          setNearbyDrivers([]);
+          setNearbyDriversCount(0);
+        }
+        return;
+      }
+      
+      // ✅ NO ACTIVE RIDE: Show all online drivers
       const filteredDrivers = data.drivers
         .filter(driver => {
           if (driver.status && !["Live", "online", "onRide", "available"].includes(driver.status)) {
@@ -325,14 +340,14 @@ const [driverMobile, setDriverMobile] = useState<string | null>(null);
                          calculateDistance(location.latitude, location.longitude, b.location.coordinates[1], b.location.coordinates[0]))
         .slice(0, 10);
       
-      console.log('Filtered drivers:', filteredDrivers.length, JSON.stringify(filteredDrivers, null, 2));
+      console.log('Filtered drivers:', filteredDrivers.length);
       setNearbyDrivers(filteredDrivers);
       setNearbyDriversCount(filteredDrivers.length);
     };
 
     socket.on("nearbyDriversResponse", handleNearbyDriversResponse);
     return () => socket.off("nearbyDriversResponse", handleNearbyDriversResponse);
-  }, [location, socketConnected]);
+  }, [location, socketConnected, currentRideId, acceptedDriver]);
 
   useEffect(() => {
     const requestLocation = async () => {
@@ -406,7 +421,6 @@ const [driverMobile, setDriverMobile] = useState<string | null>(null);
       setSocketConnected(true); 
       if (location) fetchNearbyDrivers(location.latitude, location.longitude);
       
-      // Register user with socket
       try {
         const userId = await AsyncStorage.getItem('userId');
         if (userId) {
@@ -454,11 +468,32 @@ const [driverMobile, setDriverMobile] = useState<string | null>(null);
     return () => clearInterval(interval);
   }, [rideStatus, isPickupCurrent, dropoffLocation, location, socketConnected]);
 
+  // ✅ CORRECTED: Driver live location updates with proper filtering
   useEffect(() => {
     const handleDriverLiveLocationUpdate = (data: { driverId: string; lat: number; lng: number; status?: string }) => {
       if (!location) return;
       if (data.driverId.includes('BOT')) return;
       
+      // ✅ ACTIVE RIDE: Update only accepted driver
+      if (currentRideId && acceptedDriver) {
+        if (data.driverId === acceptedDriver.driverId) {
+          console.log('📍 Updating accepted driver location during active ride');
+          setNearbyDrivers(prev => {
+            const updatedDriver = {
+              ...acceptedDriver,
+              location: { coordinates: [data.lng, data.lat] },
+              status: data.status || "onTheWay"
+            };
+            return [updatedDriver];
+          });
+          
+          // Also update driver location for tracking
+          setDriverLocation({ latitude: data.lat, longitude: data.lng });
+        }
+        return; // Ignore other drivers during active ride
+      }
+      
+      // ✅ NO ACTIVE RIDE: Update all drivers
       setNearbyDrivers((prev) => {
         const existingIndex = prev.findIndex(d => d.driverId === data.driverId);
         if (existingIndex >= 0) {
@@ -487,22 +522,36 @@ const [driverMobile, setDriverMobile] = useState<string | null>(null);
     
     socket.on("driverLiveLocationUpdate", handleDriverLiveLocationUpdate);
     return () => socket.off("driverLiveLocationUpdate", handleDriverLiveLocationUpdate);
-  }, [location]);
+  }, [location, currentRideId, acceptedDriver]);
 
   useEffect(() => {
     const handleDriverOffline = (data: { driverId: string }) => {
       console.log(`Driver ${data.driverId} went offline`);
+      
+      // ✅ Don't remove accepted driver during active ride
+      if (currentRideId && acceptedDriver && data.driverId === acceptedDriver.driverId) {
+        console.log('⚠️ Accepted driver went offline during active ride');
+        return;
+      }
+      
       setNearbyDrivers(prev => prev.filter(driver => driver.driverId !== data.driverId));
       setNearbyDriversCount(prev => Math.max(0, prev - 1));
     };
     
     socket.on("driverOffline", handleDriverOffline);
     return () => socket.off("driverOffline", handleDriverOffline);
-  }, []);
+  }, [currentRideId, acceptedDriver]);
 
   useEffect(() => {
     const handleDriverStatusUpdate = (data: { driverId: string; status: string }) => {
       console.log(`Driver ${data.driverId} status updated to: ${data.status}`);
+      
+      // ✅ Don't update accepted driver status during active ride
+      if (currentRideId && acceptedDriver && data.driverId === acceptedDriver.driverId) {
+        console.log('Keeping accepted driver status as onTheWay');
+        return;
+      }
+      
       if (data.status === "offline") {
         setNearbyDrivers(prev => prev.filter(driver => driver.driverId !== data.driverId));
         setNearbyDriversCount(prev => Math.max(0, prev - 1));
@@ -515,37 +564,43 @@ const [driverMobile, setDriverMobile] = useState<string | null>(null);
     
     socket.on("driverStatusUpdate", handleDriverStatusUpdate);
     return () => socket.off("driverStatusUpdate", handleDriverStatusUpdate);
-  }, []);
+  }, [currentRideId, acceptedDriver]);
 
+  // ✅ CORRECTED: Ride event handlers
   useEffect(() => {
     if (!currentRideId) return;
     
-const rideAccepted = (data: any) => {
-  if (data.rideId === currentRideId) {
-    setRideStatus("onTheWay");
-    setDriverId(data.driverId);
-    setDriverName(data.driverName);  // Now declared
-    setDriverMobile(data.driverMobile);  // Now declared
+    const rideAccepted = (data: any) => {
+      if (data.rideId === currentRideId) {
+        setRideStatus("onTheWay");
+        setDriverId(data.driverId);
+        setDriverName(data.driverName);
+        setDriverMobile(data.driverMobile);
 
-    // Find existing driver from nearbyDrivers and merge with new data (adds mobile)
-    const found = nearbyDrivers.find(driver => driver.driverId === data.driverId);
-    setAcceptedDriver({
-      ...found,
-      name: data.driverName || found?.name,
-      driverMobile: data.driverMobile || found?.driverMobile || 'N/A'
-    } || null);
+        const found = nearbyDrivers.find(driver => driver.driverId === data.driverId);
+        const newAccepted = {
+          driverId: data.driverId,
+          name: data.driverName || found?.name || 'Unknown',
+          driverMobile: data.driverMobile || found?.driverMobile || 'N/A',
+          location: found?.location || { coordinates: [0, 0] },
+          vehicleType: selectedRideType,
+          status: "onTheWay"
+        };
+        setAcceptedDriver(newAccepted);
 
-    // Log driver details to console
-    console.log(`✅ Ride ${currentRideId} accepted by driver:`);
-    console.log(`  Driver ID: ${data.driverId}`);
-    console.log(`  Driver Name: ${data.driverName}`);
-    console.log(`  Driver Mobile: ${data.driverMobile}`);
+        // ✅ Clear nearby drivers and show only accepted driver
+        setNearbyDrivers([newAccepted]);
+        setNearbyDriversCount(1);
 
-    // Reset alert flags
-    setDriverArrivedAlertShown(false);
-    setRideCompletedAlertShown(false);
-  }
-};
+        console.log(`✅ Ride ${currentRideId} accepted by driver:`);
+        console.log(`  Driver ID: ${data.driverId}`);
+        console.log(`  Driver Name: ${data.driverName}`);
+        console.log(`  Driver Mobile: ${data.driverMobile}`);
+
+        setDriverArrivedAlertShown(false);
+        setRideCompletedAlertShown(false);
+      }
+    };
     
     const driverLocUpdate = (data: any) => {
       if (data.rideId === currentRideId) {
@@ -567,7 +622,7 @@ const rideAccepted = (data: any) => {
             pickupLocation.longitude
           );
           
-          if (distanceToPickup <= 50 && !driverArrivedAlertShown) { // 50m
+          if (distanceToPickup <= 50 && !driverArrivedAlertShown) {
             setRideStatus("arrived");
             setDriverArrivedAlertShown(true);
             Alert.alert(
@@ -587,18 +642,21 @@ const rideAccepted = (data: any) => {
             dropoffLocation.longitude
           );
           
-          if (distanceToDropoff <= 50 && !rideCompletedAlertShown) { // 50m
+          if (distanceToDropoff <= 50 && !rideCompletedAlertShown) {
             setRideStatus("completed");
             setRideCompletedAlertShown(true);
+            
+            // ✅ CORRECTED: Ride completion handler
             Alert.alert(
               "Ride Completed",
               `Distance Travelled: ${travelledKm.toFixed(2)}km\nDriver Arrived`,
               [{ text: "OK", onPress: () => {
-                // Reset ride state after completion
                 setTimeout(() => {
+                  // Reset ride state
                   setCurrentRideId(null);
                   setDriverId(null);
                   setDriverLocation(null);
+                  setAcceptedDriver(null); // ✅ Clear accepted driver
                   setRouteCoords([]);
                   setPickupLocation(null);
                   setDropoffLocation(null);
@@ -607,7 +665,11 @@ const rideAccepted = (data: any) => {
                   setRideStatus("idle");
                   setDriverArrivedAlertShown(false);
                   setRideCompletedAlertShown(false);
-                  setAcceptedDriver(null);
+                  
+                  // ✅ Fetch all drivers again after ride completion
+                  if (location) {
+                    fetchNearbyDrivers(location.latitude, location.longitude);
+                  }
                 }, 3000);
               }}]
             );
@@ -619,9 +681,6 @@ const rideAccepted = (data: any) => {
     const rideStatusUpdate = (data: any) => {
       if (data.rideId === currentRideId) {
         setRideStatus(data.status);
-        if (data.status === "completed") {
-          // This is handled in driverLocUpdate
-        }
       }
     };
     
@@ -657,7 +716,7 @@ const rideAccepted = (data: any) => {
       socket.off("rideOTP", rideOtpListener);
       socket.off("rideCreated", rideCreated);
     };
-  }, [currentRideId, lastCoord, travelledKm, pickupLocation, dropoffLocation, rideStatus, driverArrivedAlertShown, rideCompletedAlertShown, nearbyDrivers, selectedRideType]);
+  }, [currentRideId, lastCoord, travelledKm, pickupLocation, dropoffLocation, rideStatus, driverArrivedAlertShown, rideCompletedAlertShown, nearbyDrivers, selectedRideType, location]);
 
   const handleMapPress = (e: any) => {
     const coords = e.nativeEvent.coordinate;
@@ -898,18 +957,15 @@ const rideAccepted = (data: any) => {
         return;
       }
 
-      // Fetch AsyncStorage data
       const userId = await AsyncStorage.getItem('userId');
       const customerId = (await AsyncStorage.getItem('customerId')) || 'U001';
       const userName = await AsyncStorage.getItem('userName');
       const userMobile = await AsyncStorage.getItem('userMobile');
 
-      // Generate OTP from customer ID (last 4 digits)
       let otp;
       if (customerId && customerId.length >= 4) {
         otp = customerId.slice(-4);
       } else {
-        // Fallback: Generate random 4-digit OTP
         otp = Math.floor(1000 + Math.random() * 9000).toString();
       }
 
@@ -942,7 +998,7 @@ const rideAccepted = (data: any) => {
           address: dropoff,
         },
         vehicleType: selectedRideType,
-        otp, // Send OTP to backend
+        otp,
         estimatedPrice,
         distance,
         travelTime,
@@ -950,12 +1006,10 @@ const rideAccepted = (data: any) => {
         token
       };
 
-      // Emit ride request with callback
       socket.emit('bookRide', rideData, (response) => {
         setIsBooking(false);
         
         if (response && response.success) {
-          // Use backend-generated rideId
           setCurrentRideId(response.rideId);
           setBookingOTP(response.otp);
           setShowConfirmModal(true);
@@ -990,10 +1044,8 @@ const rideAccepted = (data: any) => {
         
         const userProfile = response.data;
         
-        // Debug: Log the entire user profile to see available fields
         console.log('📋 User Profile:', userProfile);
         
-        // Try different possible field names for mobile number
         const userMobile = userProfile.mobile || 
                            userProfile.phone || 
                            userProfile.phoneNumber || 
@@ -1023,7 +1075,6 @@ const rideAccepted = (data: any) => {
           setCurrentRideId(data.rideId);
         }
         
-        // ✅ Store ride ID in AsyncStorage as backup
         AsyncStorage.setItem('lastRideId', data.rideId || currentRideId || '');
         
         setBookingOTP(data.otp);
@@ -1060,7 +1111,6 @@ const rideAccepted = (data: any) => {
     
     setRideStatus("onTheWay");
     setShowConfirmModal(false);
-
   };
 
   const renderVehicleIcon = (type: 'bike' | 'taxi' | 'port', size: number = 24, color: string = '#000000') => {
@@ -1138,38 +1188,66 @@ const rideAccepted = (data: any) => {
                 </Marker>
               )}
 
-              {nearbyDrivers
-                .filter(driver => 
-                  rideStatus === "idle" || 
-                  rideStatus === "searching" || 
-                  (acceptedDriver && driver.driverId === acceptedDriver.driverId)
-                )
-                .map((driver) => (
-                  <Marker
-                    key={driver.driverId}
-                    coordinate={{
-                      latitude: driver.location.coordinates[1],
-                      longitude: driver.location.coordinates[0],
-                    }}
-                    title={`${driver.name} (${driver.status || 'Live'})`}
-                  >
-                    <View style={styles.driverMarkerContainer}>
-                      <View style={styles.redDotMarker} />
-                      <View style={styles.vehicleIconContainer}>
-                        {renderVehicleIcon(driver.vehicleType as 'bike' | 'taxi' | 'port', 20, '#FFFFFF')}
-                      </View>
+              {/* ✅ CORRECTED: Show drivers based on ride status */}
+              {/* NO ACTIVE RIDE: Show all nearby drivers */}
+              {(rideStatus === "idle" || rideStatus === "searching") && nearbyDrivers.map((driver) => (
+                <Marker
+                  key={driver.driverId}
+                  coordinate={{
+                    latitude: driver.location.coordinates[1],
+                    longitude: driver.location.coordinates[0],
+                  }}
+                  title={`${driver.name} (${driver.status || 'Live'})`}
+                >
+                  <View style={styles.driverMarkerContainer}>
+                    <View style={styles.redDotMarker} />
+                    <View style={styles.vehicleIconContainer}>
+                      {renderVehicleIcon(driver.vehicleType as 'bike' | 'taxi' | 'port', 20, '#FFFFFF')}
                     </View>
-                  </Marker>
-                ))
-              }
+                  </View>
+                </Marker>
+              ))}
+
+              {/* ✅ ACTIVE RIDE: Show only accepted driver */}
+              {(rideStatus === "onTheWay" || rideStatus === "arrived" || rideStatus === "started") && 
+               acceptedDriver && nearbyDrivers.length > 0 && (
+                <Marker
+                  key={acceptedDriver.driverId}
+                  coordinate={{
+                    latitude: acceptedDriver.location.coordinates[1],
+                    longitude: acceptedDriver.location.coordinates[0],
+                  }}
+                  title={`${acceptedDriver.name} (Your Driver)`}
+                >
+                  <View style={styles.driverMarkerContainer}>
+                    <View style={[styles.redDotMarker, { backgroundColor: '#FF6B00' }]} />
+                    <View style={[styles.vehicleIconContainer, { backgroundColor: '#FF6B00' }]}>
+                      {renderVehicleIcon(acceptedDriver.vehicleType as 'bike' | 'taxi' | 'port', 20, '#FFFFFF')}
+                    </View>
+                  </View>
+                </Marker>
+              )}
+
               {routeCoords.length > 0 && <Polyline coordinates={routeCoords} strokeWidth={5} strokeColor="#4CAF50" />}
             </MapView>
             
-            <View style={styles.driversCountOverlay}>
-              <Text style={styles.driversCountText}>
-                Available Drivers Nearby: {nearbyDriversCount}
-              </Text>
-            </View>
+            {/* ✅ CORRECTED: Driver count display based on ride status */}
+            {(rideStatus === "idle" || rideStatus === "searching") && (
+              <View style={styles.driversCountOverlay}>
+                <Text style={styles.driversCountText}>
+                  Available Drivers Nearby: {nearbyDriversCount}
+                </Text>
+              </View>
+            )}
+
+            {/* ✅ ACTIVE RIDE: Show driver status */}
+            {(rideStatus === "onTheWay" || rideStatus === "arrived" || rideStatus === "started") && (
+              <View style={styles.driversCountOverlay}>
+                <Text style={styles.driversCountText}>
+                  Your Driver is on the way
+                </Text>
+              </View>
+            )}
           </View>
 
           {/* Driver Info Section */}
@@ -1192,7 +1270,7 @@ const rideAccepted = (data: any) => {
           )}
 
           {/* Status Indicator */}
-          {rideStatus === "onTheWay" && (
+          {/* {rideStatus === "onTheWay" && (
             <View style={styles.statusContainer}>
               <View style={styles.statusIndicator}>
                 <ActivityIndicator size="small" color="#4CAF50" />
@@ -1209,7 +1287,7 @@ const rideAccepted = (data: any) => {
                 </Text>
               )}
             </View>
-          )}
+          )} */}
 
           <View style={styles.inputContainer}>
             <View style={styles.inputWrapper}>
