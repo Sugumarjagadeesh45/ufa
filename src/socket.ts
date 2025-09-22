@@ -1,8 +1,8 @@
 import { io } from "socket.io-client";
 
- const SOCKET_URL = "https://7f0f968127de.ngrok-free.app";
+ const SOCKET_URL = "https://ba-esin.onrender.com";
 
-// const SOCKET_URL = "https://goodbackend.onrender.com";
+// const SOCKET_URL = "https://ba-esin.onrender.com";
 
 
 const socket = io(SOCKET_URL, {
