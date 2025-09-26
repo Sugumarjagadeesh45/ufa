@@ -13,7 +13,7 @@ const LOCAL_BACKEND = Platform.select({
 });
 
 // Live server URL - MAKE SURE THIS IS CORRECT
-const LIVE_BACKEND = 'https://goodbackend.onrender.com';
+const LIVE_BACKEND = 'https://ba-esin.onrender.com';
 
 // Current backend URL based on toggle
 const API_BASE_URL = useLocalhost ? LOCAL_BACKEND : LIVE_BACKEND;
